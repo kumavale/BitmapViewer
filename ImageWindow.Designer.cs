@@ -35,7 +35,7 @@ namespace BitmapViewer
             // 
             // picture_box
             // 
-            this.picture_box.Location = new System.Drawing.Point(12, 12);
+            this.picture_box.Location = new System.Drawing.Point(0, 0);
             this.picture_box.Name = "picture_box";
             this.picture_box.Size = new System.Drawing.Size(100, 50);
             this.picture_box.TabIndex = 0;

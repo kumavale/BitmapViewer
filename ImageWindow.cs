@@ -12,8 +12,10 @@ namespace BitmapViewer
 {
     public partial class ImageWindow : Form
     {
-        byte[] image_data;                 // データ格納用配列
-        Color[] palette = new Color[256];  // パレットデータ
+        static byte[] pow_of_2 = new byte[] { 1, 2, 4, 8, 16, 32, 64, 128 };  // power of 2
+
+        byte[] image_data;                           // データ格納用配列
+        SolidBrush[] palette = new SolidBrush[256];  // パレットデータ
 
         public ImageWindow()
         {
@@ -107,8 +109,9 @@ namespace BitmapViewer
                 biHeight = BitConverter.ToInt32(image_data, cur += 4);
                 // 色ビット数
                 biBitCount = (uint)BitConverter.ToUInt16(image_data, cur += 6);
-                if (biBitCount is not 0 and not 8) {
-                    return error_return("invalid bit count\nexpect `0` or `8`, but got {0}", biBitCount);
+                if (biBitCount is not 1 and not 4 and not 8 and not 24 and not 32) {
+                    return error_return("invalid bit count\nexpect `1`, `4`, `8`, `24` or `32`, but got {0}",
+                            biBitCount);
                 }
                 // 圧縮形式
                 biCompression = BitConverter.ToUInt32(image_data, cur += 2);
@@ -127,42 +130,109 @@ namespace BitmapViewer
 
             // パレットデータの読み込み
             if (cur != bfOffBits) {
-                if (biClrUsed is not 0 and not 256) {
-                    return error_return("not supported `Palette Data` :(");
+                if (biClrUsed is 0) {
+                    switch (biBitCount) {
+                        case 1: biClrUsed =   2; break;
+                        case 4: biClrUsed =  16; break;
+                        case 8: biClrUsed = 256; break;
+                        default: return error_return("not supported `Palette Data` :(");
+                    }
                 }
-                for(int i = 0; i < 256; ++i) {
+                for(int i = 0; i < biClrUsed; ++i) {
                     byte Blue  = image_data[cur++];  // 青 0-255
                     byte Green = image_data[cur++];  // 緑 0-255
                     byte Red   = image_data[cur++];  // 赤 0-255
                     Debug.Assert(image_data[cur++] == 0);  // 予約領域をスキップ
-                    palette[i] = Color.FromArgb(Red, Green, Blue);
+                    palette[i] = new SolidBrush(Color.FromArgb(Red, Green, Blue));
+                }
+                if (biClrUsed is 16) {
+                    for (int i = 0; i < 16; ++i) {
+                        palette[i << 4] = palette[i];
+                    }
                 }
             }
 
+            // 描画処理
+            draw(biBitCount, biWidth, biHeight, cur);
+
+            return true;
+        }
+
+        // キャンバスに描画する
+        private void draw(uint biBitCount, int biWidth, int biHeight, int cur) {
             // キャンバスサイズの定義
             picture_box.Size = new Size(biWidth, biHeight);
             Bitmap canvas = new Bitmap(biWidth, biHeight);
             Graphics g = Graphics.FromImage(canvas);
 
-            // 描画処理
-            for (int h = biHeight-1; 0 <= h; --h)
-            {
-                for (int w = 0; w < biWidth; ++w)
-                {
-                    byte idx = image_data[cur++];
-                    g.FillRectangle(new SolidBrush(palette[idx]), w, h, 1, 1);
-                }
-                // 4byteの境界に揃える
-                for (int padding = biWidth % 4; 0 < padding; --padding, ++cur);
+            // 色ビット数毎に処理が異なる
+            switch (biBitCount) {
+                case 1:
+                    for (int h = biHeight-1; 0 <= h; --h) {
+                        for (int w = 0; w < biWidth; ) {
+                            byte idx8 = image_data[cur++];
+                            for (int i = 7; 0 <= i; --i, ++w) {
+                                g.FillRectangle(palette[(idx8 & pow_of_2[i]) == pow_of_2[i] ? 1 : 0], w, h, 1, 1);
+                            }
+                        }
+                        // 4byteの境界に揃える
+                        for (int padding = biWidth / 8; padding % 4 is not 0; ++padding, ++cur);
+                    }
+                    break;
+
+                case 4:
+                    for (int h = biHeight-1; 0 <= h; --h) {
+                        for (int w = 0; w < biWidth; ++w) {
+                            byte idx2 = image_data[cur++];
+                            g.FillRectangle(palette[idx2 & 0b0000_1111],   w, h, 1, 1);
+                            g.FillRectangle(palette[idx2 & 0b1111_0000], ++w, h, 1, 1);
+                        }
+                        // 4byteの境界に揃える
+                        for (int padding = biWidth / 2; padding % 4 is not 0; ++padding, ++cur);
+                    }
+                    break;
+
+                case 8:
+                    for (int h = biHeight-1; 0 <= h; --h) {
+                        for (int w = 0; w < biWidth; ++w) {
+                            byte idx = image_data[cur++];
+                            g.FillRectangle(palette[idx], w, h, 1, 1);
+                        }
+                        // 4byteの境界に揃える
+                        for (int padding = biWidth; padding % 4 is not 0; ++padding, ++cur);
+                    }
+                    break;
+
+                case 24:
+                    for (int h = biHeight-1; 0 <= h; --h) {
+                        for (int w = 0; w < biWidth; ++w) {
+                            byte Blue  = image_data[cur++];  // 青 0-255
+                            byte Green = image_data[cur++];  // 緑 0-255
+                            byte Red   = image_data[cur++];  // 赤 0-255
+                            g.FillRectangle(new SolidBrush(Color.FromArgb(Red, Green, Blue)), w, h, 1, 1);
+                        }
+                        // 4byteの境界に揃える
+                        for (int padding = biWidth * 3; padding % 4 is not 0; ++padding, ++cur);
+                    }
+                    break;
+
+                case 32:
+                    for (int h = biHeight-1; 0 <= h; --h) {
+                        for (int w = 0; w < biWidth; ++w) {
+                            byte Blue  = image_data[cur++];  // 青 0-255
+                            byte Green = image_data[cur++];  // 緑 0-255
+                            byte Red   = image_data[cur++];  // 赤 0-255
+                            Debug.Assert(image_data[cur++] == 0);  // 予約領域をスキップ
+                            g.FillRectangle(new SolidBrush(Color.FromArgb(Red, Green, Blue)), w, h, 1, 1);
+                        }
+                        // 4byteの境界に揃える必要はない
+                    }
+                    break;
             }
 
             g.Dispose();
-
             picture_box.Image = canvas;
-            picture_box.Location = new Point(0, 0);
             this.ClientSize = new Size(biWidth, biHeight);
-
-            return true;
         }
     }
 }
