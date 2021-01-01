@@ -12,7 +12,7 @@ namespace BitmapViewer
 {
     public partial class ImageWindow : Form
     {
-        static byte[] pow_of_2 = new byte[] { 1, 2, 4, 8, 16, 32, 64, 128 };  // power of 2
+        static int[] pow_of_2 = new int[] { 1, 2, 4, 8, 16, 32, 64, 128, 256 };  // power of 2
 
         byte[] image_data;                           // データ格納用配列
         SolidBrush[] palette = new SolidBrush[256];  // パレットデータ
@@ -62,6 +62,15 @@ namespace BitmapViewer
             return false;
         }
 
+        // 1になっているビット数を数えて返す
+        private int numofbits(int bits) {
+            bits = (bits & 0x55555555) + (bits >> 1 & 0x55555555);
+            bits = (bits & 0x33333333) + (bits >> 2 & 0x33333333);
+            bits = (bits & 0x0f0f0f0f) + (bits >> 4 & 0x0f0f0f0f);
+            bits = (bits & 0x00ff00ff) + (bits >> 8 & 0x00ff00ff);
+            return (bits & 0x0000ffff) + (bits >>16 & 0x0000ffff);
+        }
+
         // ビットマップ画像の生成
         private bool create_bitmap()
         {
@@ -74,9 +83,11 @@ namespace BitmapViewer
             int  biWidth;         // 画像の幅 (px)
             int  biHeight;        // 画像の高さ (px)
             uint biBitCount;      // 色ビット数 (bit)  ※このソフトウェアでは8bitのみ対応する
-            uint biCompression;   // 圧縮形式 (0|1|2) ※無圧縮, RLE8, RLE4
+            uint biCompression;   // 圧縮形式 (0|1|2|3) ※無圧縮, RLE8, RLE4, BitField
             uint biClrUsed;       // 格納パレット数 (0|2|16|256)
             uint biCirImportant;  // 重要色数
+            // カラーマスク
+            int[] color_mask = new int[3];  // RGB順 (色ビット数が16または32の場合のみ使用)
 
             // ファイルヘッダ解析 (14byte)
             {
@@ -112,14 +123,14 @@ namespace BitmapViewer
                 }
                 // 色ビット数
                 biBitCount = (uint)BitConverter.ToUInt16(image_data, cur += 6);
-                if (biBitCount is not 1 and not 4 and not 8 and not 24 and not 32) {
-                    return error_return("invalid bit count\nexpect `1`, `4`, `8`, `24` or `32`, but got {0}",
+                if (biBitCount is not 1 and not 4 and not 8 and not 16 and not 24 and not 32) {
+                    return error_return("invalid bit count\nexpect `1`, `4`, `8`, `16`, `24` or `32`, but got {0}",
                             biBitCount);
                 }
                 // 圧縮形式
                 biCompression = BitConverter.ToUInt32(image_data, cur += 2);
-                if (biCompression is not 0 and not 1 and not 2) {
-                    return error_return("invalid compressed format\nexpect `0`, `1` or `2`, but got {0}",
+                if (biCompression is not 0 and not 1 and not 2 and not 3) {
+                    return error_return("invalid compressed format\nexpect `0`, `1`, `2` or `3`, but got {0}",
                             biCompression);
                 }
                 // 格納パレット数
@@ -130,6 +141,26 @@ namespace BitmapViewer
                 cur += 4;
                 Debug.Assert(cur == 14 + 40);
                 Debug.Assert(biWidth * biHeight <= Int32.MaxValue);
+            }
+
+            // カラーマスクの読み込み
+            if (biBitCount is 16 or 32) {
+                if (biCompression is 3) {
+                    color_mask[0] = BitConverter.ToInt32(image_data, cur);       // 赤
+                    color_mask[1] = BitConverter.ToInt32(image_data, cur += 4);  // 緑
+                    color_mask[2] = BitConverter.ToInt32(image_data, cur += 4);  // 青
+                    cur += 4;
+                } else if (biBitCount is 16) {
+                    // 規定値 RGB555
+                    color_mask[0] = 0x00007c00;  // 赤
+                    color_mask[1] = 0x000003E0;  // 緑
+                    color_mask[2] = 0x0000001F;  // 青
+                } else if (biBitCount is 32) {
+                    // 規定値 RGB888
+                    color_mask[0] = 0x00FF0000;  // 赤
+                    color_mask[1] = 0x0000FF00;  // 緑
+                    color_mask[2] = 0x000000FF;  // 青
+                }
             }
 
             // パレットデータの読み込み
@@ -143,11 +174,11 @@ namespace BitmapViewer
                     }
                 }
                 for(int i = 0; i < biClrUsed; ++i) {
-                    byte Blue  = image_data[cur++];  // 青 0-255
-                    byte Green = image_data[cur++];  // 緑 0-255
-                    byte Red   = image_data[cur++];  // 赤 0-255
+                    byte blue  = image_data[cur++];  // 青 0-255
+                    byte green = image_data[cur++];  // 緑 0-255
+                    byte red   = image_data[cur++];  // 赤 0-255
                     Debug.Assert(image_data[cur++] == 0);  // 予約領域をスキップ
-                    palette[i] = new SolidBrush(Color.FromArgb(Red, Green, Blue));
+                    palette[i] = new SolidBrush(Color.FromArgb(red, green, blue));
                 }
                 if (biClrUsed is 2) {
                     for (int i = 1; i < 8; ++i) {
@@ -167,16 +198,17 @@ namespace BitmapViewer
 
             // 描画処理
             switch (biCompression) {
-                case 0: draw_rgb (biBitCount, biWidth, biHeight, cur); break;
-                case 1: draw_rle8(biBitCount, biWidth, biHeight, cur); break;
-                case 2: draw_rle4(biBitCount, biWidth, biHeight, cur); break;
+                case 0:
+                case 3: draw_rgb_bf(biBitCount, biWidth, biHeight, cur, color_mask); break;
+                case 1: draw_rle8  (biBitCount, biWidth, biHeight, cur); break;
+                case 2: draw_rle4  (biBitCount, biWidth, biHeight, cur); break;
             }
 
             return true;
         }
 
-        // キャンバスに描画する (無圧縮)
-        private void draw_rgb(uint biBitCount, int biWidth, int biHeight, int cur) {
+        // キャンバスに描画する (無圧縮, Bitfields)
+        private void draw_rgb_bf(uint biBitCount, int biWidth, int biHeight, int cur, int[] color_mask) {
             // キャンバスサイズの定義
             Bitmap canvas = new Bitmap(biWidth, biHeight);
             Graphics g = Graphics.FromImage(canvas);
@@ -220,13 +252,31 @@ namespace BitmapViewer
                     }
                     break;
 
+                case 16:
+                    for (int h = biHeight-1; 0 <= h; --h) {
+                        for (int w = 0; w < biWidth; ++w) {
+                            int rgb = image_data[cur++] | image_data[cur++] << 8;
+                            int red   = (color_mask[0] & -color_mask[0]) is 0 ? 0 : (rgb & color_mask[0]) / (color_mask[0] & -color_mask[0]);
+                            int green = (color_mask[1] & -color_mask[1]) is 0 ? 0 : (rgb & color_mask[1]) / (color_mask[1] & -color_mask[1]);
+                            int blue  = (color_mask[2] & -color_mask[2]) is 0 ? 0 : (rgb & color_mask[2]) / (color_mask[2] & -color_mask[2]);
+                            g.FillDot(new SolidBrush(Color.FromArgb(
+                                (int)((float)red   / (pow_of_2[numofbits(color_mask[0])]-1) * 255),
+                                (int)((float)green / (pow_of_2[numofbits(color_mask[1])]-1) * 255),
+                                (int)((float)blue  / (pow_of_2[numofbits(color_mask[2])]-1) * 255))),
+                                w, h);
+                        }
+                        // 4byteの境界に揃える
+                        for (int padding = biWidth * 2; padding % 4 is not 0; ++padding, ++cur);
+                    }
+                    break;
+
                 case 24:
                     for (int h = biHeight-1; 0 <= h; --h) {
                         for (int w = 0; w < biWidth; ++w) {
-                            byte Blue  = image_data[cur++];  // 青 0-255
-                            byte Green = image_data[cur++];  // 緑 0-255
-                            byte Red   = image_data[cur++];  // 赤 0-255
-                            g.FillDot(new SolidBrush(Color.FromArgb(Red, Green, Blue)), w, h);
+                            byte blue  = image_data[cur++];  // 青 0-255
+                            byte green = image_data[cur++];  // 緑 0-255
+                            byte red   = image_data[cur++];  // 赤 0-255
+                            g.FillDot(new SolidBrush(Color.FromArgb(red, green, blue)), w, h);
                         }
                         // 4byteの境界に揃える
                         for (int padding = biWidth * 3; padding % 4 is not 0; ++padding, ++cur);
@@ -236,11 +286,16 @@ namespace BitmapViewer
                 case 32:
                     for (int h = biHeight-1; 0 <= h; --h) {
                         for (int w = 0; w < biWidth; ++w) {
-                            byte Blue  = image_data[cur++];  // 青 0-255
-                            byte Green = image_data[cur++];  // 緑 0-255
-                            byte Red   = image_data[cur++];  // 赤 0-255
+                            int rgb = image_data[cur++] | image_data[cur++] << 8 | image_data[cur++] << 16;
                             Debug.Assert(image_data[cur++] == 0);  // 予約領域をスキップ
-                            g.FillDot(new SolidBrush(Color.FromArgb(Red, Green, Blue)), w, h);
+                            int red   = (color_mask[0] & -color_mask[0]) is 0 ? 0 : (rgb & color_mask[0]) / (color_mask[0] & -color_mask[0]);
+                            int green = (color_mask[1] & -color_mask[1]) is 0 ? 0 : (rgb & color_mask[1]) / (color_mask[1] & -color_mask[1]);
+                            int blue  = (color_mask[2] & -color_mask[2]) is 0 ? 0 : (rgb & color_mask[2]) / (color_mask[2] & -color_mask[2]);
+                            g.FillDot(new SolidBrush(Color.FromArgb(
+                                (int)((float)red   / (pow_of_2[numofbits(color_mask[0])]-1) * 255),
+                                (int)((float)green / (pow_of_2[numofbits(color_mask[1])]-1) * 255),
+                                (int)((float)blue  / (pow_of_2[numofbits(color_mask[2])]-1) * 255))),
+                                w, h);
                         }
                         // 4byteの境界に揃える必要はない
                     }
