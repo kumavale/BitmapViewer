@@ -52,7 +52,7 @@ namespace BitmapViewer
         // ビットマップ画像ウィンドウを表示する
          public void show()
          {
-             this.ShowDialog();
+             this.Show();
          }
 
         // メッセージボックスにエラー出力をしてfalseを返す
